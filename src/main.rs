@@ -1,5 +1,8 @@
 use plotters::prelude::*;
 use std::cmp;
+use std::path::PathBuf;
+
+const OUT_DIR: &str = "./out";
 
 const EJECTION_BALANCE: u64 = 16_000_000_000;
 const FAR_FUTURE_EPOCH: u64 = 18446744073709551615;
@@ -17,6 +20,7 @@ struct State {
     inactivity_scores: Vec<u64>,
     participating_count: u64,
     participating: Vec<bool>,
+    total_initial_balance: u64,
     exit_queue_epoch: u64,
     exit_queue_churn: u64,
     active_count_prev_epoch: u64,
@@ -34,6 +38,7 @@ impl State {
             inactivity_scores: vec![],
             participating_count: 0,
             participating: vec![],
+            total_initial_balance: 0,
             exit_queue_epoch: 0,
             exit_queue_churn: 0,
             active_count_prev_epoch: 0,
@@ -48,6 +53,7 @@ impl State {
         self.balances.push(initial_balance);
         self.inactivity_scores.push(0);
         self.participating.push(participating);
+        self.total_initial_balance += initial_balance;
         self.active_balance += initial_balance;
         self.active_count_prev_epoch += 1;
         if participating {
@@ -207,7 +213,13 @@ fn compute_min_max_avg(numbers: &[u64]) -> (u64, u64, f64) {
     (min, max, avg)
 }
 
-fn run_test(offline_percent: usize) -> Result<(), Box<dyn std::error::Error>> {
+struct Results {
+    offline_percent: usize,
+    inactivity_leak_stop_days: f64,
+    fraction_total_balance_burned: f64,
+}
+
+fn run_test(offline_percent: usize) -> Result<Results, Box<dyn std::error::Error>> {
     // Example usage
     let mut state = State::new();
     state.add_validator(true, 32_000_000_000);
@@ -264,11 +276,24 @@ fn run_test(offline_percent: usize) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    let inactivity_leak_stop_epoch = inactivity_leak_stop_epoch.unwrap_or(0);
+    let inactivity_leak_stop_days =
+        (inactivity_leak_stop_epoch * 32 * 12) as f64 / (60 * 60 * 24) as f64;
+    let total_balance_burned = state
+        .balances
+        .iter()
+        .map(|b| initial_balance.saturating_sub(*b))
+        .sum::<u64>();
+    let fraction_total_balance_burned =
+        total_balance_burned as f64 / state.total_initial_balance as f64;
+
     println!(
         "
 offline_percent:        {offline_percent}
-inactivity_leak_stop:   {inactivity_leak_stop_epoch:?}
-balance[end]:           {} {} {}
+inactivity_leak_stop:   {inactivity_leak_stop_epoch} epochs
+inactivity_leak_stop:   {inactivity_leak_stop_days} days
+fraction_eth_burned:    {fraction_total_balance_burned}
+balances[end]:          {} {} {}
 inactivity_scores[end]: {} {} {}
 activate_validators[e]: {}
 participation[end]:     {}
@@ -313,11 +338,18 @@ exit_queue_epoch:       {}
             .collect::<Vec<f32>>(),
     )?;
 
-    Ok(())
+    Ok(Results {
+        offline_percent,
+        inactivity_leak_stop_days,
+        fraction_total_balance_burned,
+    })
 }
 
 fn draw_line(filename: &str, data: &[f32]) -> Result<(), Box<dyn std::error::Error>> {
-    let root = BitMapBackend::new(filename, (640, 480)).into_drawing_area();
+    std::fs::create_dir_all(OUT_DIR).unwrap();
+    let filepath = PathBuf::from(OUT_DIR).join(filename);
+
+    let root = BitMapBackend::new(&filepath, (640, 480)).into_drawing_area();
     root.fill(&WHITE)?;
 
     let max = data.iter().max_by(|a, b| a.partial_cmp(b).unwrap());
@@ -355,8 +387,19 @@ fn draw_line(filename: &str, data: &[f32]) -> Result<(), Box<dyn std::error::Err
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut results = vec![];
+
     for offline_percent in [35, 40, 50, 60, 70, 80, 90] {
-        run_test(offline_percent)?;
+        results.push(run_test(offline_percent)?);
+    }
+
+    println!("| inactive % | inactivity_leak_stop_days | fraction_total_balance_burned |");
+    println!("| - | - | - |");
+    for r in results {
+        println!(
+            "| {} | {} | {} |",
+            r.offline_percent, r.inactivity_leak_stop_days, r.fraction_total_balance_burned
+        );
     }
 
     Ok(())
